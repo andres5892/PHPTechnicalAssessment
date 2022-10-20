@@ -22,6 +22,8 @@ class DataImport
      */
     public function getCsvData()
     {
+        $conn = $this->connection->connect();
+        $conn->beginTransaction();
         if (count($this->argv) <= 1) {
             die("Missing argument (e.g. php -f src/DataImport.php temp/customers-info.csv)");
         }
@@ -35,25 +37,27 @@ class DataImport
             while (($row = fgetcsv($file, null, ",")) !== FALSE) {
                 $count++;
                 if (count($row) !== count($headers)) {
+                    $conn->rollBack();
                     die("Row $count has fewer columns than expected.");
                 }
                 $data = array_combine($headers, $row);
                 if (!$this->emailValidator($data['email'])) {
+                    $conn->rollBack();
                     die("Row $count has not a valid email");
                 }
                 if (!$this->dateValidator($data['birthday'])) {
+                    $conn->rollBack();
                     die("Row $count has not a valid birthday");
                 }
                 $data['password'] = password_hash($data['password'], PASSWORD_BCRYPT);
 
-                $this->insertToDatabase($data);
-
-                var_dump($data);
-
-                die;
+                $countryId = $this->insertCountry($conn, $data);
+                $addressId = $this->insertAddress($conn, $data, $countryId);
+                $this->insertCustomer($conn, $data, $addressId);
             }
             fclose($file);
         }
+        $conn->commit();
     }
 
     /**
@@ -75,9 +79,55 @@ class DataImport
         return $dateTime && $dateTime->format('m/d/Y') == $date;
     }
 
-    private function insertToDatabase($data)
+    /**
+     * @param $conn
+     * @param $data
+     * @return mixed
+     */
+    private function insertCountry($conn, $data)
     {
-        var_dump($this->connection->connect());die;
+        $stmt = $conn->prepare("SELECT id FROM Country WHERE country_name like ? LIMIT 1");
+        $stmt->setFetchMode(\PDO::FETCH_ASSOC);
+        $stmt->execute([$data['country']]);
+        $id = $stmt->fetch()['id'];
+
+        if (empty($id)) {
+            $stmt = $conn->prepare("INSERT Country (country_name) VALUES (?)");
+            $stmt->execute([$data['country']]);
+            $id = $conn->lastInsertId();
+        }
+
+        return $id;
+    }
+
+    /**
+     * @param $conn
+     * @param $data
+     * @param $countryId
+     * @return mixed
+     */
+    private function insertAddress($conn, $data, $countryId)
+    {
+        $stmt = $conn->prepare("INSERT Address (street_suffix,street_name,street_number,
+                                postal_code,region,city,country_id) VALUES (?,?,?,?,?,?,?)");
+        $stmt->execute([$data['street_suffix'], $data['street'], $data['street_number'],
+                        $data['postal_code'], $data['region'], $data['city'], $countryId]);
+
+        return $conn->lastInsertId();
+    }
+
+    /**
+     * @param $conn
+     * @param $data
+     * @param $addressId
+     * @return void
+     */
+    private function insertCustomer($conn, $data, $addressId)
+    {
+        $stmt = $conn->prepare("INSERT Customer (first_name,last_name,email,
+                                password,birthday,telephone,address_id) VALUES (?,?,?,?,?,?,?)");
+        $stmt->execute([$data['first_name'], $data['last_name'], $data['email'], $data['password'],
+                        $data['birthday'], $data['telephone'], $addressId]);
     }
 }
 
